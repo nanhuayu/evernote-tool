@@ -40,7 +40,7 @@ def parse_enex(file_path, output_dir):
 def parse_note_data(note, output_dir, assets_dir):
     try:
         note_data = extract_note_data(note)
-        debug_flag = any(i in note_data['title'] for i in ['Vue笔记', 'Vuex笔记', 'GMM高斯混合', 'Transformer笔记', 'EM'])
+        debug_flag = any(i in note_data['title'] for i in ['Transformer笔记', 'EM'])
         print(f"检查条件: {debug_flag}")
         markdown_content = process_attachments(note, note_data, assets_dir)
         markdown_content = convert_enml_to_markdown(markdown_content)

@@ -25,12 +25,13 @@ class Converter:
         )
 
     @classmethod
-    def enex_to_markdown(cls, source: Union[str, Path], target: Union[str, Path]) -> None:
+    def enex_to_markdown(cls, source: Union[str, Path], target: Union[str, Path], parser_type: str = 'soup') -> None:
         """将ENEX文件转换为Markdown文件
         
         Args:
             source: ENEX文件路径
             target: 输出目录路径
+            parser_type: 解析器类型 ('soup'或'html.parser')
         """
         try:
             source_path = Path(source)
@@ -49,7 +50,7 @@ class Converter:
             logging.info(f"成功解析 {len(notes)} 个笔记")
             
             # 保存为Markdown
-            writer = MarkdownWriter(str(target_path))
+            writer = MarkdownWriter(str(target_path), parser_type)
             writer.save_all(notes)
             logging.info(f"已保存Markdown文件到: {target_path}")
             

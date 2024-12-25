@@ -1,6 +1,6 @@
 import logging
 import re
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Declaration, Doctype, NavigableString, Comment
 import frontmatter
 from datetime import datetime
 from pathlib import Path
@@ -180,10 +180,16 @@ def parse_markdown_file(file_path: str, resource_paths: List[Path] = None) -> Op
 
 
 class MarkdownWriter:
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, parser_type: str = 'soup'):
+        """
+        初始化 MarkdownWriter
+        :param output_dir: 输出目录
+        :param parser_type: 解析器类型 ('html2text' 或 'soup')
+        """
         self.output_dir = Path(output_dir)
         self.assets_dir = self.output_dir / 'assets'
-        self.html_converter = self._setup_html_converter()
+        self.parser_type = parser_type if parser_type in ['html2text', 'soup'] else 'soup'
+        self.html_converter = self._setup_html_converter() if parser_type == 'html2text' else None
         
         # Create output directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -247,32 +253,91 @@ class MarkdownWriter:
     def _convert_to_markdown(self, html_content: str) -> str:
         """转换HTML内容为Markdown格式"""
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            # 预处理表格
-            tables = soup.find_all('table')
-            for table in tables:
-                markdown_table = self._convert_table_to_markdown(table)
-                # # 创建包装容器
-                # wrapper = soup.new_tag('div')
-                # # 使用pre标签保护格式
-                # pre = soup.new_tag('pre')
-                # pre.string = markdown_table
-                # wrapper.append(pre)
-                # table.replace_with(wrapper)
-                placeholder = soup.new_string(f"\n{markdown_table}\n")
-                table.replace_with(placeholder)
-            
-            # 转换HTML到Markdown
-            markdown_content = self.html_converter.handle(str(soup))
-            
-            # 清理格式
-            markdown_content = self._clean_markdown(markdown_content)
-            
-            return markdown_content
+            if self.parser_type == 'html2text':
+                return self._convert_with_html2text(html_content)
+            else:
+                return self._convert_with_soup(html_content)
         except Exception as e:
             logging.error(f"HTML转Markdown失败: {e}")
             return html_content
+
+    def _convert_with_html2text(self, html_content: str) -> str:
+        """使用html2text转换"""
+        soup = BeautifulSoup(html_content, features='xml')
+        
+        # 预处理表格
+        tables = soup.find_all('table')
+        for table in tables:
+            markdown_table = self._convert_table_to_markdown(table)
+            placeholder = soup.new_string(f"\n{markdown_table}\n")
+            table.replace_with(placeholder)
+        
+        # 转换HTML到Markdown
+        markdown_content = self.html_converter.handle(str(soup))
+        
+        # 清理格式
+        return self._clean_markdown(markdown_content)
+
+    def _convert_with_soup(self, html_content: str) -> str:
+        """使用BeautifulSoup转换"""
+        soup = BeautifulSoup(html_content, features='xml')
+        markdown_content = self._process_soup_elements(soup)
+        return self._clean_markdown(markdown_content)
+
+    def _process_soup_elements(self, soup):
+        """处理HTML元素"""
+        markdown_lines = []
+        
+        for element in soup.contents:
+            if isinstance(element, (Doctype, Comment, Declaration)):
+                continue
+
+            elif isinstance(element, NavigableString):
+                text = str(element).strip()
+                if text:
+                    markdown_lines.append(text)
+                    
+            elif element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                content = self._process_soup_elements(element)
+                level = int(element.name[1])
+                markdown_lines.append(f"\n{'#' * level} {content}\n\n")
+                
+            elif element.name == 'div' or element.name == 'p':
+                content = self._process_soup_elements(element)
+                markdown_lines.append(content + '\n')
+                
+            elif element.name == 'br':
+                markdown_lines.append('\n')
+                
+            elif element.name == 'span':
+                content = self._process_soup_elements(element)
+                markdown_lines.append(content)
+                
+            elif element.name == 'table':
+                table_md = self._convert_table_to_markdown(element)
+                markdown_lines.append(table_md + '\n')
+                
+            elif element.name == 'img':
+                img_src = element.get('src', '')
+                alt = element.get('alt', '') 
+                markdown_lines.append(f"![{alt}]({img_src})\n")
+                
+            elif element.name in ['ol', 'ul']:
+                list_items = element.find_all('li', recursive=False)
+                for i, li in enumerate(list_items):
+                    content = self._process_soup_elements(li)
+                    if element.name == 'ol':
+                        markdown_lines.append(f"{i + 1}. {content}\n")
+                    else:
+                        markdown_lines.append(f"* {content}\n")
+                        
+                
+            else:
+                content = self._process_soup_elements(element)
+                if content.strip():
+                    markdown_lines.append(content)
+                    
+        return ''.join(markdown_lines)
 
     def _clean_markdown(self, content: str) -> str:
         """清理Markdown格式"""
@@ -345,7 +410,7 @@ class MarkdownWriter:
 
             # 更新内容中的引用
             relative_path = f"assets/{resource.file_name}"
-            media_tag = f'<en-media.*?hash="{resource.hash}".*?></en-media>'
+            media_tag = f'<en-media.*?hash="{resource.hash}".*?(?:></en-media>|/>)'
             if resource.mime.startswith('image/'):
                 replacement = f'![{resource.file_name}]({relative_path})'
             else:
