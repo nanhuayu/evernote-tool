@@ -4,6 +4,7 @@ from html2text import HTML2Text
 import re
 
 from ..utils.logger import get_logger
+from .table_handler import TableHandler
 
 logger = get_logger()
 
@@ -12,6 +13,7 @@ class HtmlToMarkdownConverter:
     
     def __init__(self, converter_type: str = 'soup'):
         self.converter_type = converter_type
+        self.table_handler = TableHandler()  # 使用专门的表格处理器
         if converter_type == 'html2text':
             self.html2text = self._setup_html2text()
     
@@ -27,6 +29,7 @@ class HtmlToMarkdownConverter:
         converter.wrap_links = False
         converter.escape_snob = False
         converter.ul_item_mark = "-"
+        converter.bypass_tables = True  # 我们自己处理表格
         return converter
     
     def convert(self, html: str) -> str:
@@ -40,12 +43,15 @@ class HtmlToMarkdownConverter:
         """使用html2text转换"""
         soup = BeautifulSoup(html, 'xml')
         
-        # 预处理表格
+        # 预处理表格 - 使用新的表格处理器
         for table in soup.find_all('table'):
-            table_md = self._convert_table(table)
-            table.replace_with(soup.new_string(f"\n{table_md}\n"))
+            markdown_table = self.table_handler.html_table_to_markdown(table)
+            table.replace_with(soup.new_string(f"\n{markdown_table}\n"))
         
+        # 转换HTML到Markdown
         markdown = self.html2text.handle(str(soup))
+        
+        # 清理格式
         return self._clean_markdown(markdown)
     
     def _convert_with_soup(self, html: str) -> str:
@@ -62,7 +68,7 @@ class HtmlToMarkdownConverter:
             # 跳过特殊节点
             if isinstance(child, (Comment, Doctype, Declaration)):
                 continue
-            
+
             # 文本节点
             if isinstance(child, NavigableString):
                 text = str(child).strip()
@@ -72,8 +78,8 @@ class HtmlToMarkdownConverter:
             
             # 标题
             if child.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                level = int(child.name[1])
                 content = self._process_elements(child)
+                level = int(child.name[1])
                 lines.append(f"\n{'#' * level} {content}\n")
             
             # 段落和div
@@ -90,9 +96,10 @@ class HtmlToMarkdownConverter:
             elif child.name in ['ul', 'ol']:
                 lines.append(self._convert_list(child))
             
-            # 表格
+            # 表格 - 使用新的表格处理器
             elif child.name == 'table':
-                lines.append(self._convert_table(child))
+                table_md = self.table_handler.html_table_to_markdown(child)
+                lines.append(f"\n{table_md}\n")
             
             # 图片
             elif child.name == 'img':
@@ -104,7 +111,10 @@ class HtmlToMarkdownConverter:
             elif child.name == 'a':
                 href = child.get('href', '')
                 text = self._process_elements(child)
-                lines.append(f"[{text}]({href})")
+                if href:
+                    lines.append(f"[{text}]({href})")
+                else:
+                    lines.append(text)
             
             # 加粗
             elif child.name in ['strong', 'b']:
@@ -121,6 +131,27 @@ class HtmlToMarkdownConverter:
                 content = self._process_elements(child)
                 lines.append(f"`{content}`")
             
+            # 代码块
+            elif child.name == 'pre':
+                code = child.find('code')
+                if code:
+                    content = code.get_text()
+                    lang = self._detect_code_language(code)
+                    lines.append(f"\n```{lang}\n{content}\n```\n")
+                else:
+                    content = child.get_text()
+                    lines.append(f"\n```\n{content}\n```\n")
+            
+            # 引用
+            elif child.name == 'blockquote':
+                content = self._process_elements(child)
+                quoted = '\n'.join(f"> {line}" for line in content.split('\n') if line.strip())
+                lines.append(f"\n{quoted}\n")
+            
+            # 水平线
+            elif child.name == 'hr':
+                lines.append('\n---\n')
+            
             # 其他标签
             else:
                 content = self._process_elements(child)
@@ -136,44 +167,31 @@ class HtmlToMarkdownConverter:
         
         for i, item in enumerate(items):
             content = self._process_elements(item).strip()
+            # 处理嵌套列表
+            content_lines = content.split('\n')
+            
             if list_elem.name == 'ol':
-                lines.append(f"{i + 1}. {content}")
+                lines.append(f"{i + 1}. {content_lines[0]}")
             else:
-                lines.append(f"- {content}")
+                lines.append(f"- {content_lines[0]}")
+            
+            # 添加缩进的后续行
+            for line in content_lines[1:]:
+                if line.strip():
+                    lines.append(f"  {line}")
         
         return '\n'.join(lines) + '\n'
     
-    def _convert_table(self, table) -> str:
-        """转换表格为Markdown"""
-        rows = table.find_all('tr')
-        if not rows:
-            return ''
-        
-        table_data = []
-        max_cols = 0
-        
-        for row in rows:
-            cells = row.find_all(['td', 'th'])
-            row_data = [
-                ' '.join(cell.stripped_strings) or ' '
-                for cell in cells
-            ]
-            table_data.append(row_data)
-            max_cols = max(max_cols, len(row_data))
-        
-        # 补齐列数
-        for row in table_data:
-            while len(row) < max_cols:
-                row.append(' ')
-        
-        # 生成Markdown表格
-        lines = []
-        lines.append('| ' + ' | '.join(table_data[0]) + ' |')
-        lines.append('| ' + ' | '.join(['---'] * max_cols) + ' |')
-        for row in table_data[1:]:
-            lines.append('| ' + ' | '.join(row) + ' |')
-        
-        return '\n'.join(lines) + '\n'
+    def _detect_code_language(self, code_elem) -> str:
+        """检测代码语言"""
+        # 检查class属性
+        classes = code_elem.get('class', [])
+        for cls in classes:
+            if cls.startswith('language-'):
+                return cls.replace('language-', '')
+            elif cls in ['python', 'javascript', 'java', 'cpp', 'c', 'bash', 'sql']:
+                return cls
+        return ''
     
     def _clean_markdown(self, content: str) -> str:
         """清理Markdown内容"""
@@ -183,7 +201,10 @@ class HtmlToMarkdownConverter:
         # 修复链接
         content = re.sub(r'<(https?://[^>]+)>', r'[\1](\1)', content)
         
-        # 清理转义
-        content = re.sub(r'\\([#\-*_.>])', r'\1', content)
+        # 清理转义（但保留表格中的转义管道符）
+        # content = re.sub(r'\\([#\-*_.>])', r'\1', content)
+        
+        # 确保列表和其他块级元素前后有空行
+        content = re.sub(r'([^\n])\n(\d+\.|-|\*) ', r'\1\n\n\2 ', content)
         
         return content.strip()

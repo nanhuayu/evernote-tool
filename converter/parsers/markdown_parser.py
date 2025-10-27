@@ -14,6 +14,7 @@ from ..utils.helpers import (
     guess_extension, find_file
 )
 from ..config import Config
+from ..processors.table_handler import TableHandler
 
 logger = get_logger()
 
@@ -23,7 +24,17 @@ class MarkdownParser(BaseParser):
     def __init__(self, source: Path, resource_paths: List[Path] = None):
         super().__init__(source)
         self.resource_paths = self._init_resource_paths(resource_paths)
-        self.html_converter = Markdown(extensions=Config.MARKDOWN_EXTENSIONS)
+        self.table_handler = TableHandler()
+        
+        # 配置Markdown解析器，包含表格扩展
+        self.html_converter = Markdown(extensions=[
+            'extra',
+            'tables',  # 表格支持
+            'fenced_code',
+            'nl2br',
+            'attr_list',  # 属性列表
+            'def_list',   # 定义列表
+        ])
     
     def _init_resource_paths(self, paths: List[Path] = None) -> List[Path]:
         """初始化资源搜索路径"""
@@ -43,8 +54,11 @@ class MarkdownParser(BaseParser):
             with open(self.source, 'r', encoding='utf-8') as f:
                 post = frontmatter.load(f)
             
+            # 预处理Markdown内容（处理表格）
+            processed_content = self._preprocess_markdown(post.content)
+            
             # 转换为HTML
-            html_content = self.html_converter.convert(post.content)
+            html_content = self.html_converter.convert(processed_content)
             
             # 创建笔记
             metadata = post.metadata
@@ -74,6 +88,45 @@ class MarkdownParser(BaseParser):
             logger.error(f"Markdown解析失败 {self.source}: {e}")
             return None
     
+    def _preprocess_markdown(self, content: str) -> str:
+        """
+        预处理Markdown内容
+        主要是确保表格格式正确
+        """
+        lines = content.split('\n')
+        processed_lines = []
+        in_table = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # 检测表格开始
+            if stripped.startswith('|') and '|' in stripped[1:]:
+                if not in_table:
+                    # 确保表格前有空行
+                    if processed_lines and processed_lines[-1].strip():
+                        processed_lines.append('')
+                    in_table = True
+                processed_lines.append(line)
+            elif in_table:
+                if not stripped:
+                    # 表格结束
+                    in_table = False
+                    processed_lines.append(line)
+                elif stripped.startswith('|'):
+                    processed_lines.append(line)
+                else:
+                    # 表格结束
+                    in_table = False
+                    # 确保表格后有空行
+                    if processed_lines[-1].strip():
+                        processed_lines.append('')
+                    processed_lines.append(line)
+            else:
+                processed_lines.append(line)
+        
+        return '\n'.join(processed_lines)
+    
     def _parse_tags(self, tags) -> List[str]:
         """解析标签"""
         if isinstance(tags, str):
@@ -83,13 +136,32 @@ class MarkdownParser(BaseParser):
     def _parse_resources(self, content: str) -> List[Resource]:
         """解析资源"""
         resources = []
-        # 匹配Markdown图片语法: ![alt](path)
-        pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
         
-        for match in re.finditer(pattern, content):
+        # 匹配Markdown图片语法: ![alt](path)
+        img_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        
+        for match in re.finditer(img_pattern, content):
             file_path = match.group(2)
+            # 跳过URL
+            if file_path.startswith(('http://', 'https://', 'data:')):
+                continue
+            
             resource = self._load_resource(file_path)
             if resource:
+                resources.append(resource)
+        
+        # 匹配文件链接: [text](path)
+        link_pattern = r'(?<!!)\[([^\]]+)\]\(([^)]+)\)'
+        
+        for match in re.finditer(link_pattern, content):
+            file_path = match.group(2)
+            # 跳过URL和锚点
+            if file_path.startswith(('http://', 'https://', '#', 'mailto:')):
+                continue
+            
+            # 尝试作为本地文件资源
+            resource = self._load_resource(file_path)
+            if resource and not resource.mime.startswith('image/'):
                 resources.append(resource)
         
         return resources
@@ -146,6 +218,10 @@ class MarkdownParser(BaseParser):
                 media = soup.new_tag('en-media')
                 media['type'] = resource.mime
                 media['hash'] = resource.hash
+                if resource.width:
+                    media['width'] = str(resource.width)
+                if resource.height:
+                    media['height'] = str(resource.height)
                 img.replace_with(media)
         
         return str(soup)
